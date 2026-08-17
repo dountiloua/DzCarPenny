@@ -1,8 +1,9 @@
 import requests
 from bs4 import BeautifulSoup
 import logging
+import os
 from typing import List, Dict
-import time
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +11,15 @@ logger = logging.getLogger(__name__)
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
+
+# Check if scraper API is available
+SCRAPINGBEE_API_KEY = os.environ.get("SCRAPINGBEE_API_KEY")
+USE_API = SCRAPINGBEE_API_KEY is not None
+
+if USE_API:
+    logger.info("✅ ScrapingBee API enabled - Using API for scraping")
+else:
+    logger.info("⚠️ ScrapingBee API key not found - Using basic scraper (limited)")
 
 
 class CarScraper:
@@ -19,11 +29,60 @@ class CarScraper:
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         self.timeout = 10
+        self.use_api = USE_API
+        self.api_key = SCRAPINGBEE_API_KEY
+        self.api_base = "https://api.scrapingbee.com/api/v1"
+    
+    def _scrape_with_api(self, url: str, site_name: str) -> str:
+        """Scrape using ScrapingBee API."""
+        try:
+            response = requests.get(
+                self.api_base,
+                params={
+                    'api_key': self.api_key,
+                    'url': url,
+                    'render_js': 'true',  # Handle JavaScript
+                    'timeout': 30000
+                },
+                timeout=40
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"✅ {site_name}: API scrape successful")
+                return response.content
+            else:
+                logger.warning(f"⚠️ {site_name}: API returned status {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ {site_name}: API error: {e}")
+            return None
+    
+    def _scrape_basic(self, url: str, site_name: str) -> str:
+        """Scrape using basic requests (no JavaScript support)."""
+        try:
+            response = self.session.get(url, headers=HEADERS, timeout=self.timeout)
+            response.raise_for_status()
+            logger.info(f"✅ {site_name}: Basic scrape successful")
+            return response.content
+            
+        except Exception as e:
+            logger.error(f"❌ {site_name}: Basic scrape error: {e}")
+            return None
+    
+    def _get_html(self, url: str, site_name: str) -> str:
+        """Get HTML using API if available, otherwise use basic scraper."""
+        if self.use_api:
+            html = self._scrape_with_api(url, site_name)
+            if html:
+                return html
+            logger.warning(f"⚠️ {site_name}: API failed, falling back to basic scraper")
+        
+        return self._scrape_basic(url, site_name)
     
     def scrape_autoscout24(self, max_price: int) -> List[Dict]:
         """Scrape AutoScout24.fr for car listings."""
         try:
-            from datetime import datetime
             current_year = datetime.now().year
             url = (
                 f"https://www.autoscout24.fr/lst?"
@@ -35,35 +94,45 @@ class CarScraper:
                 f"&powertype=kw&sort=age"
             )
             
-            response = self.session.get(url, headers=HEADERS, timeout=self.timeout)
-            response.raise_for_status()
+            html = self._get_html(url, "AutoScout24")
+            if not html:
+                return []
             
-            soup = BeautifulSoup(response.content, 'lxml')
+            soup = BeautifulSoup(html, 'lxml')
             cars = []
             
-            # AutoScout24 car listing selector
+            # AutoScout24 car listing selectors
             listings = soup.find_all('a', {'class': 'ListItem_container__J_mHJ'})
+            
+            if not listings:
+                # Fallback selector
+                listings = soup.find_all('article', {'class': lambda x: x and 'ListItem' in x})
             
             for listing in listings[:10]:  # Limit to 10 results
                 try:
                     link = listing.get('href')
+                    if not link:
+                        continue
                     if not link.startswith('http'):
                         link = 'https://www.autoscout24.fr' + link
                     
                     # Extract car title
                     title_elem = listing.find('h2')
+                    if not title_elem:
+                        title_elem = listing.find('a')
                     title = title_elem.text.strip() if title_elem else "Unknown Car"
                     
                     # Extract price
-                    price_elem = listing.find('span', {'class': 'Price_price__AjG_I'})
+                    price_elem = listing.find('span', {'class': lambda x: x and 'Price' in x})
                     price = price_elem.text.strip() if price_elem else "N/A"
                     
-                    cars.append({
-                        'source': 'AutoScout24',
-                        'title': title,
-                        'price': price,
-                        'link': link
-                    })
+                    if title and title != "Unknown Car":
+                        cars.append({
+                            'source': 'AutoScout24',
+                            'title': title,
+                            'price': price,
+                            'link': link
+                        })
                 except Exception as e:
                     logger.warning(f"Error parsing AutoScout24 listing: {e}")
                     continue
@@ -88,30 +157,40 @@ class CarScraper:
                 f"&sort=time&order=desc"
             )
             
-            response = self.session.get(url, headers=HEADERS, timeout=self.timeout)
-            response.raise_for_status()
+            html = self._get_html(url, "Leboncoin")
+            if not html:
+                return []
             
-            soup = BeautifulSoup(response.content, 'lxml')
+            soup = BeautifulSoup(html, 'lxml')
             cars = []
             
-            # Leboncoin car listing selector
-            listings = soup.find_all('a', {'class': 'styles_cardContainer__LBqKX'})
+            # Leboncoin car listing selectors
+            listings = soup.find_all('a', {'class': lambda x: x and 'card' in x})
+            
+            if not listings:
+                listings = soup.find_all('div', {'class': lambda x: x and 'listing' in x})
             
             for listing in listings[:10]:  # Limit to 10 results
                 try:
-                    link = listing.get('href')
+                    # Try to find link
+                    link_elem = listing.find('a')
+                    link = link_elem.get('href') if link_elem else None
+                    
+                    if not link:
+                        link = listing.get('href')
+                    
                     if link and not link.startswith('http'):
                         link = 'https://www.leboncoin.fr' + link
                     
                     # Extract car title
-                    title_elem = listing.find('h3')
+                    title_elem = listing.find(['h2', 'h3', 'a'])
                     title = title_elem.text.strip() if title_elem else "Unknown Car"
                     
                     # Extract price
-                    price_elem = listing.find('span', {'class': 'styles_price__S6BVN'})
+                    price_elem = listing.find('span', {'class': lambda x: x and 'price' in x.lower()})
                     price = price_elem.text.strip() if price_elem else "N/A"
                     
-                    if link:
+                    if link and title and title != "Unknown Car":
                         cars.append({
                             'source': 'Leboncoin',
                             'title': title,
@@ -140,30 +219,38 @@ class CarScraper:
                 f"&damaged=non"
             )
             
-            response = self.session.get(url, headers=HEADERS, timeout=self.timeout)
-            response.raise_for_status()
+            html = self._get_html(url, "LaCentrale")
+            if not html:
+                return []
             
-            soup = BeautifulSoup(response.content, 'lxml')
+            soup = BeautifulSoup(html, 'lxml')
             cars = []
             
-            # LaCentrale car listing selector
-            listings = soup.find_all('a', {'class': 'adCard_adCard__link__CjXBA'})
+            # LaCentrale car listing selectors
+            listings = soup.find_all('a', {'class': lambda x: x and 'ad' in x})
+            
+            if not listings:
+                listings = soup.find_all('div', {'class': lambda x: x and 'card' in x})
             
             for listing in listings[:10]:  # Limit to 10 results
                 try:
                     link = listing.get('href')
+                    if not link:
+                        link_elem = listing.find('a')
+                        link = link_elem.get('href') if link_elem else None
+                    
                     if link and not link.startswith('http'):
                         link = 'https://www.lacentrale.fr' + link
                     
                     # Extract car title
-                    title_elem = listing.find('h3')
+                    title_elem = listing.find(['h2', 'h3', 'a'])
                     title = title_elem.text.strip() if title_elem else "Unknown Car"
                     
                     # Extract price
-                    price_elem = listing.find('span', {'class': 'price'})
+                    price_elem = listing.find('span', {'class': lambda x: x and 'price' in x.lower()})
                     price = price_elem.text.strip() if price_elem else "N/A"
                     
-                    if link:
+                    if link and title and title != "Unknown Car":
                         cars.append({
                             'source': 'LaCentrale',
                             'title': title,
