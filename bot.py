@@ -5,6 +5,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from datetime import datetime
 import re
 from urllib.parse import quote
+from scraper import CarScraper
+import asyncio
 
 # Enable logging
 logging.basicConfig(
@@ -17,6 +19,9 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is not set!")
 
+# Initialize scraper
+scraper = CarScraper()
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send welcome message."""
@@ -26,7 +31,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "France Auto Export Sourcing Agent\n\n"
         "Enter your maximum price in EUR:\n\n"
-        "🔍 Sources: AutoScout24.fr & Leboncoin.fr\n"
+        "🔍 Sources: AutoScout24.fr, Leboncoin.fr & LaCentrale.fr\n"
         "⛽ Fuel: Essence / Hybride only\n"
         "📅 Year: 2023+\n"
         "🛠️ Condition: Non-accidenté\n"
@@ -35,49 +40,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def generate_autoscout24_link(max_price: int) -> str:
-    """Generate a direct AutoScout24.fr search link with all filters applied."""
-    current_year = datetime.now().year
-    url = (
-        f"https://www.autoscout24.fr/lst?"
-        f"fuel=B%2CH"
-        f"&pricefrom=0&priceto={max_price}"
-        f"&fregfrom=2023&fregto={current_year}"
-        f"&desc=1&size=20&page=1&fc=0&cy=F"
-        f"&damaged_listing=exclude"
-        f"&powertype=kw&sort=age"
-    )
-    return url
-
-
-def generate_leboncoin_link(max_price: int) -> str:
-    """Generate a direct Leboncoin.fr search link with all filters applied."""
-    url = (
-        f"https://www.leboncoin.fr/recherche?category=2"
-        f"&fuel=1"
-        f"&price=min-{max_price}"
-        f"&regdate=2023-max"
-        f"&vehicle_damage=undamaged"
-        f"&sort=time&order=desc"
-    )
-    return url
-
-
-def generate_lacentrale_link(max_price: int) -> str:
-    """Generate a direct LaCentrale.fr search link with filters."""
-    url = (
-        f"https://www.lacentrale.fr/listing?"
-        f"makesModelsCommercialNames="
-        f"&priceMax={max_price}"
-        f"&yearMin=2023"
-        f"&energies=essence%2Chybride"
-        f"&damaged=non"
-    )
-    return url
-
-
 async def search_cars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle price input and generate direct search links."""
+    """Handle price input and scrape car listings."""
     text = update.message.text.strip()
 
     price_match = re.search(r'\d+', text.replace(" ", "").replace(",", "").replace(".", ""))
@@ -90,39 +54,96 @@ async def search_cars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("Please enter a price between 1,000€ and 100,000€.")
         return
 
-    # Generate filtered links
-    autoscout_link = generate_autoscout24_link(max_price)
-    leboncoin_link = generate_leboncoin_link(max_price)
-    lacentrale_link = generate_lacentrale_link(max_price)
-
-    today = datetime.now().strftime("%d/%m/%Y")
-
-    response_text = (
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🚗  CARDZSCRAP RESULTS  🚗\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📅 Date: {today}\n"
-        f"💰 Max Price: {max_price:,}€\n"
-        f"⛽ Fuel: Essence / Hybride\n"
-        f"📅 Year: 2023 → {datetime.now().year}\n"
-        f"🛠️ Condition: Non-accidenté\n"
-        f"📦 Export Ready\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🔗 CLICK TO VIEW LISTINGS:\n\n"
-        f"1️⃣ AutoScout24.fr:\n{autoscout_link}\n\n"
-        f"2️⃣ Leboncoin.fr:\n{leboncoin_link}\n\n"
-        f"3️⃣ LaCentrale.fr:\n{lacentrale_link}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ All filters pre-applied!\n"
-        "Just click the links above to see\n"
-        "all matching cars instantly.\n\n"
-        "💡 Tip: Bookmark these links to\n"
-        "check for new listings daily.\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Powered by CARDZSCRAP 🚗"
+    # Send processing message
+    processing_msg = await update.message.reply_text(
+        "🔍 Searching for cars on all websites...\n"
+        "This may take a few seconds⏳"
     )
 
-    await update.message.reply_text(response_text, disable_web_page_preview=True)
+    try:
+        # Run scraping in thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(None, scraper.scrape_all, max_price)
+
+        # Build response
+        today = datetime.now().strftime("%d/%m/%Y")
+
+        response_text = (
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "🚗  CARDZSCRAP RESULTS  🚗\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📅 Date: {today}\n"
+            f"💰 Max Price: {max_price:,}€\n"
+            f"⛽ Fuel: Essence / Hybride\n"
+            f"📅 Year: 2023 → {datetime.now().year}\n"
+            f"🛠️ Condition: Non-accidenté\n"
+            f"📦 Export Ready\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+
+        # AutoScout24 results
+        if results['autoscout24']:
+            response_text += "🔗 <b>AutoScout24.fr</b> - Found {} cars:\n\n".format(
+                len(results['autoscout24'])
+            )
+            for i, car in enumerate(results['autoscout24'], 1):
+                response_text += (
+                    f"{i}. <b>{car['title']}</b>\n"
+                    f"   💰 {car['price']}\n"
+                    f"   🔗 <a href='{car['link']}'>View listing</a>\n\n"
+                )
+        else:
+            response_text += "❌ <b>AutoScout24.fr</b> - No cars found\n\n"
+
+        # Leboncoin results
+        if results['leboncoin']:
+            response_text += "🔗 <b>Leboncoin.fr</b> - Found {} cars:\n\n".format(
+                len(results['leboncoin'])
+            )
+            for i, car in enumerate(results['leboncoin'], 1):
+                response_text += (
+                    f"{i}. <b>{car['title']}</b>\n"
+                    f"   💰 {car['price']}\n"
+                    f"   🔗 <a href='{car['link']}'>View listing</a>\n\n"
+                )
+        else:
+            response_text += "❌ <b>Leboncoin.fr</b> - No cars found\n\n"
+
+        # LaCentrale results
+        if results['lacentrale']:
+            response_text += "🔗 <b>LaCentrale.fr</b> - Found {} cars:\n\n".format(
+                len(results['lacentrale'])
+            )
+            for i, car in enumerate(results['lacentrale'], 1):
+                response_text += (
+                    f"{i}. <b>{car['title']}</b>\n"
+                    f"   💰 {car['price']}\n"
+                    f"   🔗 <a href='{car['link']}'>View listing</a>\n\n"
+                )
+        else:
+            response_text += "❌ <b>LaCentrale.fr</b> - No cars found\n\n"
+
+        response_text += (
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "✅ All listings direct links!\n"
+            "Click any link to view full details.\n\n"
+            "💡 Tip: Save this message to check\n"
+            "new listings daily.\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Powered by CARDZSCRAP 🚗"
+        )
+
+        # Delete processing message and send results
+        await processing_msg.delete()
+        await update.message.reply_text(response_text, parse_mode='HTML')
+
+    except Exception as e:
+        logger.error(f"Scraping error: {e}")
+        await processing_msg.delete()
+        await update.message.reply_text(
+            f"❌ Error searching for cars: {str(e)}\n\n"
+            "Please try again later."
+        )
 
 
 def main() -> None:
@@ -130,7 +151,7 @@ def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_cars))
-    logger.info("CARDZSCRAP Bot started - AutoScout24.fr & Leboncoin.fr & LaCentrale.fr")
+    logger.info("CARDZSCRAP Bot started - Scraping AutoScout24.fr, Leboncoin.fr & LaCentrale.fr")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
