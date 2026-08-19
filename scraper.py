@@ -12,14 +12,16 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
-# Check if scraper API is available
+# Check if scraper APIs are available
 SCRAPINGBEE_API_KEY = os.environ.get("SCRAPINGBEE_API_KEY")
-USE_API = SCRAPINGBEE_API_KEY is not None
+SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY")
 
-if USE_API:
-    logger.info("✅ ScrapingBee API enabled - Using API for scraping")
-else:
-    logger.info("⚠️ ScrapingBee API key not found - Using basic scraper (limited)")
+if SCRAPINGBEE_API_KEY:
+    logger.info("✅ ScrapingBee API enabled - Tier 1 (Primary)")
+if SCRAPERAPI_KEY:
+    logger.info("✅ ScraperAPI enabled - Tier 2 (Fallback)")
+if not SCRAPINGBEE_API_KEY and not SCRAPERAPI_KEY:
+    logger.info("⚠️ No scraper APIs configured - Using basic scraper (limited)")
 
 
 class CarScraper:
@@ -29,17 +31,18 @@ class CarScraper:
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         self.timeout = 10
-        self.use_api = USE_API
-        self.api_key = SCRAPINGBEE_API_KEY
-        self.api_base = "https://api.scrapingbee.com/api/v1"
+        self.scrapingbee_key = SCRAPINGBEE_API_KEY
+        self.scraperapi_key = SCRAPERAPI_KEY
+        self.scrapingbee_base = "https://api.scrapingbee.com/api/v1"
+        self.scraperapi_base = "https://api.scraperapi.com"
     
-    def _scrape_with_api(self, url: str, site_name: str) -> str:
-        """Scrape using ScrapingBee API."""
+    def _scrape_with_scrapingbee(self, url: str, site_name: str) -> str:
+        """Scrape using ScrapingBee API (Tier 1)."""
         try:
             response = requests.get(
-                self.api_base,
+                self.scrapingbee_base,
                 params={
-                    'api_key': self.api_key,
+                    'api_key': self.scrapingbee_key,
                     'url': url,
                     'render_js': 'true',  # Handle JavaScript
                     'timeout': 30000
@@ -48,36 +51,69 @@ class CarScraper:
             )
             
             if response.status_code == 200:
-                logger.info(f"✅ {site_name}: API scrape successful")
+                logger.info(f"✅ {site_name}: ScrapingBee API successful")
                 return response.content
             else:
-                logger.warning(f"⚠️ {site_name}: API returned status {response.status_code}")
+                logger.warning(f"⚠️ {site_name}: ScrapingBee returned status {response.status_code}")
                 return None
                 
         except Exception as e:
-            logger.error(f"❌ {site_name}: API error: {e}")
+            logger.error(f"❌ {site_name}: ScrapingBee error: {e}")
+            return None
+    
+    def _scrape_with_scraperapi(self, url: str, site_name: str) -> str:
+        """Scrape using ScraperAPI (Tier 2 - Fallback)."""
+        try:
+            response = requests.get(
+                self.scraperapi_base,
+                params={
+                    'api_key': self.scraperapi_key,
+                    'url': url,
+                    'render': 'true'  # Handle JavaScript
+                },
+                timeout=40
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"✅ {site_name}: ScraperAPI successful")
+                return response.content
+            else:
+                logger.warning(f"⚠️ {site_name}: ScraperAPI returned status {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ {site_name}: ScraperAPI error: {e}")
             return None
     
     def _scrape_basic(self, url: str, site_name: str) -> str:
-        """Scrape using basic requests (no JavaScript support)."""
+        """Scrape using basic requests (Tier 3 - Last resort)."""
         try:
             response = self.session.get(url, headers=HEADERS, timeout=self.timeout)
             response.raise_for_status()
-            logger.info(f"✅ {site_name}: Basic scrape successful")
+            logger.info(f"✅ {site_name}: Basic scraper successful")
             return response.content
             
         except Exception as e:
-            logger.error(f"❌ {site_name}: Basic scrape error: {e}")
+            logger.error(f"❌ {site_name}: Basic scraper error: {e}")
             return None
     
     def _get_html(self, url: str, site_name: str) -> str:
-        """Get HTML using API if available, otherwise use basic scraper."""
-        if self.use_api:
-            html = self._scrape_with_api(url, site_name)
+        """Get HTML using API tiers: ScrapingBee -> ScraperAPI -> Basic Scraper."""
+        # Tier 1: Try ScrapingBee API
+        if self.scrapingbee_key:
+            html = self._scrape_with_scrapingbee(url, site_name)
             if html:
                 return html
-            logger.warning(f"⚠️ {site_name}: API failed, falling back to basic scraper")
+            logger.warning(f"⚠️ {site_name}: ScrapingBee failed, trying ScraperAPI...")
         
+        # Tier 2: Try ScraperAPI
+        if self.scraperapi_key:
+            html = self._scrape_with_scraperapi(url, site_name)
+            if html:
+                return html
+            logger.warning(f"⚠️ {site_name}: ScraperAPI failed, falling back to basic scraper...")
+        
+        # Tier 3: Fall back to basic scraper
         return self._scrape_basic(url, site_name)
     
     def scrape_autoscout24(self, max_price: int) -> List[Dict]:
